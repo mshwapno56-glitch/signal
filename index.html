@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Signal Lab</title>
+<style>
+:root{--bg:#0e1217;--card:#171d25;--line:#273141;--text:#e7edf4;--mut:#8a97a8;--acc:#4ea1ff;--good:#3fb950;--bad:#f85149;--warn:#d9a21b}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,Roboto,sans-serif}
+body{padding:0 12px 80px}
+header{display:flex;justify-content:space-between;align-items:baseline;padding:14px 2px 6px}
+h1{font-size:18px;margin:0}
+.mut{color:var(--mut)}
+.tab{display:none}.tab.on{display:block}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin:10px 0}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}
+.btn{background:var(--acc);color:#04121f;border:0;border-radius:10px;padding:10px 14px;font-weight:600;font-size:14px}
+.btn.alt{background:#222c39;color:var(--text);border:1px solid var(--line)}
+.btn:disabled{opacity:.5}
+input,select,textarea{background:#0e1217;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px;font-size:14px;width:100%;font-family:inherit}
+label{display:block;font-size:12px;color:var(--mut);margin:8px 0 3px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{color:var(--mut);font-weight:500;text-align:left;padding:6px 3px;border-bottom:1px solid var(--line)}
+td{padding:7px 3px;border-bottom:1px solid var(--line);white-space:nowrap}
+.tag{padding:1px 6px;border-radius:8px;font-size:11px}
+.t-noise{background:#262f3b;color:var(--mut)}
+.t-few{background:#3a3014;color:var(--warn)}
+.t-check{background:#14301c;color:var(--good)}
+.up{color:var(--good)}.down{color:var(--bad)}
+.kv{display:flex;justify-content:space-between;gap:10px;padding:5px 0;border-bottom:1px solid var(--line)}
+.kv:last-of-type{border:0}
+.verdict{margin-top:8px;padding:8px 10px;border-radius:8px;background:#222c39}
+.note{font-size:12px;color:var(--mut);margin:8px 2px}
+nav{position:fixed;left:0;right:0;bottom:0;display:flex;background:#121820;border-top:1px solid var(--line)}
+nav button{flex:1;background:none;border:0;color:var(--mut);padding:15px 0;font-size:13px}
+nav button.on{color:var(--acc);font-weight:600}
+.entry{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--line);font-size:13px}
+.x{background:none;border:0;color:var(--mut);font-size:20px;padding:0 6px}
+</style>
+</head>
+<body>
+<header><h1>Signal Lab</h1><span class="mut" id="clock"></span></header>
+
+<section id="tab-scan" class="tab on">
+  <div class="row"><button class="btn" id="btnScan">Scan now</button><span class="mut" id="scanStatus"></span></div>
+  <div class="card" style="padding:6px 8px">
+    <table>
+      <thead><tr><th>Pair</th><th>RSI</th><th>Trend</th><th>L3</th><th>Next (hist.)</th><th>N</th><th>Flag</th></tr></thead>
+      <tbody id="scanBody"><tr><td colspan="7" class="mut">Tap "Scan now".</td></tr></tbody>
+    </table>
+  </div>
+  <p class="note">NEXT = how often price closed that way after the same RSI zone in past data. It is history, not a prediction.
+  noise = same as a coin flip. few = too little data. check = worth re-testing on other data, not a signal.
+  With many pairs, about 1 in 20 looks special by pure luck. L3 = last 3 candles (U up, D down).</p>
+</section>
+
+<section id="tab-bt" class="tab">
+  <div class="card">
+    <label>Pair</label><select id="btPair"></select>
+    <div class="row"><button class="btn" id="btRun">Run backtest</button><button class="btn alt" id="btAll">Test all pairs</button></div>
+    <span class="mut" id="btStatus"></span>
+  </div>
+  <div id="btOut"></div>
+  <p class="note">Rule: RSI crosses below the low level = UP, above the high level = DOWN, one trade at a time. Break-even is the win rate needed at your payout. Yahoo forex data is not identical to the broker feed, so results are only an approximation.</p>
+</section>
+
+<section id="tab-log" class="tab">
+  <div class="card" id="logStats"></div>
+  <div class="card">
+    <div class="grid2">
+      <div><label>Pair</label><select id="lgPair"></select></div>
+      <div><label>Direction</label><select id="lgSide"><option>UP</option><option>DOWN</option></select></div>
+      <div><label>Stake</label><input id="lgStake" type="number" inputmode="decimal" value="1"></div>
+      <div><label>Result</label><select id="lgRes"><option value="win">Win</option><option value="loss">Loss</option><option value="tie">Tie</option></select></div>
+    </div>
+    <label>Note (why did you enter?)</label><input id="lgNote" type="text" placeholder="e.g. RSI 28 cross">
+    <div class="row"><button class="btn" id="lgAdd">Add trade</button><button class="btn alt" id="lgClear">Clear all</button></div>
+  </div>
+  <div class="card" id="lgList"></div>
+</section>
+
+<section id="tab-set" class="tab">
+  <div class="card">
+    <div class="grid2">
+      <div><label>Candle interval</label>
+        <select id="sInterval"><option>1m</option><option>5m</option><option>15m</option><option>30m</option><option>60m</option></select></div>
+      <div><label>Expiry (candles)</label><input id="sExpiry" type="number" inputmode="numeric"></div>
+      <div><label>RSI period</label><input id="sPeriod" type="number" inputmode="numeric"></div>
+      <div><label>Payout %</label><input id="sPayout" type="number" inputmode="decimal"></div>
+      <div><label>RSI low (UP below)</label><input id="sLow" type="number" inputmode="decimal"></div>
+      <div><label>RSI high (DOWN above)</label><input id="sHigh" type="number" inputmode="decimal"></div>
+      <div><label>Stake (backtest)</label><input id="sStake" type="number" inputmode="decimal"></div>
+    </div>
+    <label>Pairs (Yahoo symbols, comma separated)</label>
+    <textarea id="sPairs" rows="4"></textarea>
+    <div class="row"><button class="btn alt" id="sReset">Reset to defaults</button></div>
+    <p class="note">Changes save automatically. Data source: Yahoo Finance (free, delayed). This app never places orders and never asks for any broker login.</p>
+  </div>
+</section>
+
+<nav>
+  <button data-tab="scan" class="on">Scan</button>
+  <button data-tab="bt">Backtest</button>
+  <button data-tab="log">Log</button>
+  <button data-tab="set">Settings</button>
+</nav>
+
+<script>
+// ==CORE START==
+function rv(g,l){if(l===0)return g>0?100:50;return 100-100/(1+g/l);}
+function rsiSeries(c,p){
+  var n=c.length,out=new Array(n).fill(null);
+  if(n<=p)return out;
+  var g=0,l=0,i,d;
+  for(i=1;i<=p;i++){d=c[i]-c[i-1];if(d>=0)g+=d;else l-=d;}
+  var ag=g/p,al=l/p;out[p]=rv(ag,al);
+  for(i=p+1;i<n;i++){
+    d=c[i]-c[i-1];
+    var gg=d>0?d:0,ll=d<0?-d:0;
+    ag=(ag*(p-1)+gg)/p;al=(al*(p-1)+ll)/p;
+    out[i]=rv(ag,al);
+  }
+  return out;
+}
+function getSignal(prev,cur,S){
+  if(prev===null||cur===null)return null;
+  if(prev>=S.low&&cur<S.low)return 'UP';
+  if(prev<=S.high&&cur>S.high)return 'DOWN';
+  return null;
+}
+function runBacktest(c,S){
+  var N=S.expiry,r=rsiSeries(c,S.period),out=[],i=1;
+  while(i<c.length-N){
+    var side=getSignal(r[i-1],r[i],S);
+    if(side){
+      var e=c[i],x=c[i+N],w;
+      if(x===e)w=null;else if(side==='UP')w=x>e;else w=x<e;
+      out.push({i:i,side:side,win:w});i+=N;
+    }else i++;
+  }
+  return out;
+}
+function summarize(res,S){
+  var dec=res.filter(function(r){return r.win!==null;});
+  var wins=dec.filter(function(r){return r.win;}).length;
+  var losses=dec.length-wins,ties=res.length-dec.length;
+  var pay=S.payout/100,be=100/(1+pay);
+  var wr=dec.length?wins/dec.length*100:0;
+  var st=0,worst=0;
+  dec.forEach(function(r){if(r.win)st=0;else{st++;if(st>worst)worst=st;}});
+  var h=Math.floor(dec.length/2);
+  var rate=function(a){return a.length?a.filter(function(r){return r.win;}).length/a.length*100:0;};
+  return {trades:res.length,wins:wins,losses:losses,ties:ties,decided:dec.length,wr:wr,be:be,
+    pnl:wins*S.stake*pay-losses*S.stake,worst:worst,h1:rate(dec.slice(0,h)),h2:rate(dec.slice(h))};
+}
+function emaLast(c,p){
+  var k=2/(p+1),e=c[0];
+  for(var i=0;i<c.length;i++)e=c[i]*k+e*(1-k);
+  return e;
+}
+function zoneOf(r){if(r<30)return 0;if(r<45)return 1;if(r<55)return 2;if(r<70)return 3;return 4;}
+var ZONES=['<30','30-45','45-55','55-70','>70'];
+function scanOne(c,S){
+  var p=S.period,N=S.expiry;
+  if(c.length<Math.max(60,p+10))return null;
+  var r=rsiSeries(c,p),cur=r[r.length-1],z=zoneOf(cur),up=0,dn=0,i;
+  for(i=p;i<c.length-N;i++){
+    if(zoneOf(r[i])!==z)continue;
+    var nx=c[i+N];
+    if(nx>c[i])up++;else if(nx<c[i])dn++;
+  }
+  var n=up+dn,pUp=n?up/n:0.5,zs=n?(pUp-0.5)/Math.sqrt(0.25/n):0;
+  var be=1/(1+S.payout/100),tag;
+  if(n<100)tag='few';
+  else if((zs>=2&&pUp>be)||(zs<=-2&&(1-pUp)>be))tag='check';
+  else tag='noise';
+  var trend=emaLast(c,20)>emaLast(c,50)?'UP':'DOWN';
+  var l3='';
+  for(i=c.length-3;i<c.length;i++)l3+=c[i]>c[i-1]?'U':(c[i]<c[i-1]?'D':'-');
+  return {rsi:cur,zone:ZONES[z],trend:trend,last3:l3,pUp:pUp,n:n,z:zs,tag:tag};
+}
+// ==CORE END==
+
+// ---------- helpers ----------
+var $=function(id){return document.getElementById(id);};
+function esc(s){return String(s).replace(/[&<>"']/g,function(m){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m];});}
+function load(k,d){try{var v=localStorage.getItem(k);return v?JSON.parse(v):d;}catch(e){return d;}}
+function save(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}}
+var DEF={interval:'5m',expiry:1,period:14,low:30,high:70,payout:85,stake:1,
+  pairs:['EURUSD=X','GBPUSD=X','USDJPY=X','AUDUSD=X','USDCAD=X','USDCHF=X','NZDUSD=X','EURGBP=X','EURJPY=X','GBPJPY=X','AUDJPY=X','EURAUD=X','EURCAD=X','EURCHF=X','GBPAUD=X']};
+var S=Object.assign({},DEF,load('sl_settings',{}));
+var LOG=load('sl_log',[]);
+var RANGE={'1m':'7d','5m':'30d','15m':'60d','30m':'60d','60m':'60d'};
+var SECS={'1m':60,'5m':300,'15m':900,'30m':1800,'60m':3600};
+function nm(p){return p.replace('=X','');}
+function cid(p){return 'r_'+p.replace(/[^A-Za-z0-9]/g,'_');}
+function sleep(ms){return new Promise(function(r){setTimeout(r,ms);});}
+
+// ---------- networking (native bridge, with browser fallback) ----------
+var _id=0,_cb={};
+window.onNative=function(id,ok,body){
+  var c=_cb[id];if(!c)return;delete _cb[id];
+  if(ok)c.res(body);else c.rej(new Error(body));
+};
+function httpGet(url){
+  return new Promise(function(res,rej){
+    if(window.Native&&window.Native.get){var id=++_id;_cb[id]={res:res,rej:rej};window.Native.get(id,url);}
+    else fetch(url).then(function(r){return r.ok?r.text():Promise.reject(new Error('HTTP '+r.status));}).then(res,rej);
+  });
+}
+async function fetchCandles(sym,iv,rng){
+  var url='https://query1.finance.yahoo.com/v8/finance/chart/'+encodeURIComponent(sym)+'?interval='+iv+'&range='+rng;
+  var j=JSON.parse(await httpGet(url));
+  var r=j.chart.result[0],ts=r.timestamp,cl=r.indicators.quote[0].close,out=[];
+  for(var i=0;i<ts.length;i++){if(cl[i]!==null&&cl[i]!==undefined)out.push([ts[i],cl[i]]);}
+  return out;
+}
+function shortErr(e){var m=String(e&&e.message?e.message:e);return m.length>40?m.slice(0,40)+'...':m;}
+
+// ---------- tabs ----------
+function show(t){
+  document.querySelectorAll('.tab').forEach(function(x){x.classList.toggle('on',x.id==='tab-'+t);});
+  document.querySelectorAll('nav button').forEach(function(x){x.classList.toggle('on',x.dataset.tab===t);});
+  window.scrollTo(0,0);
+  if(t==='log')renderLog();
+}
+document.querySelectorAll('nav button').forEach(function(b){b.onclick=function(){show(b.dataset.tab);};});
+
+// ---------- settings ----------
+function fillSettings(){
+  $('sInterval').value=S.interval;$('sExpiry').value=S.expiry;$('sPeriod').value=S.period;
+  $('sLow').value=S.low;$('sHigh').value=S.high;$('sPayout').value=S.payout;$('sStake').value=S.stake;
+  $('sPairs').value=S.pairs.join(', ');
+}
+function fillPairSelects(){
+  ['btPair','lgPair'].forEach(function(id){
+    var el=$(id),cur=el.value;
+    el.innerHTML=S.pairs.map(function(p){return '<option value="'+esc(p)+'">'+esc(nm(p))+'</option>';}).join('');
+    if(S.pairs.indexOf(cur)>=0)el.value=cur;
+  });
+}
+function readSettings(){
+  S.interval=$('sInterval').value;
+  S.expiry=Math.max(1,parseInt($('sExpiry').value)||1);
+  S.period=Math.max(2,parseInt($('sPeriod').value)||14);
+  S.low=parseFloat($('sLow').value)||30;
+  S.high=parseFloat($('sHigh').value)||70;
+  S.payout=parseFloat($('sPayout').value)||85;
+  S.stake=parseFloat($('sStake').value)||1;
+  var ps=$('sPairs').value.split(/[\s,]+/).map(function(x){return x.trim().toUpperCase();}).filter(Boolean);
+  if(ps.length)S.pairs=ps;
+  save('sl_settings',S);fillPairSelects();
+}
+['sInterval','sExpiry','sPeriod','sLow','sHigh','sPayout','sStake','sPairs'].forEach(function(id){$(id).onchange=readSettings;});
+$('sReset').onclick=function(){S=Object.assign({},DEF);save('sl_settings',S);fillSettings();fillPairSelects();};
+
+// ---------- scanner ----------
+$('btnScan').onclick=async function(){
+  var btn=$('btnScan');btn.disabled=true;
+  var body=$('scanBody'),stale=false,done=0;
+  body.innerHTML=S.pairs.map(function(p){return '<tr id="'+cid(p)+'"><td>'+esc(nm(p))+'</td><td colspan="6" class="mut">...</td></tr>';}).join('');
+  for(var k=0;k<S.pairs.length;k++){
+    var p=S.pairs[k],row=$(cid(p));
+    try{
+      var c=await fetchCandles(p,S.interval,RANGE[S.interval]||'30d');
+      c=c.slice(0,-1);
+      if(!c.length)throw new Error('no data');
+      if(Date.now()/1000-c[c.length-1][0]>SECS[S.interval]*3+120)stale=true;
+      var r=scanOne(c.map(function(x){return x[1];}),S);
+      if(!r){row.innerHTML='<td>'+esc(nm(p))+'</td><td colspan="6" class="mut">too little data</td>';}
+      else{
+        var nx=r.pUp>=0.5?'<span class="up">UP '+(r.pUp*100).toFixed(1)+'%</span>':'<span class="down">DOWN '+((1-r.pUp)*100).toFixed(1)+'%</span>';
+        row.innerHTML='<td><b>'+esc(nm(p))+'</b></td><td>'+r.rsi.toFixed(1)+'</td><td class="'+(r.trend==='UP'?'up':'down')+'">'+r.trend+'</td><td>'+r.last3+'</td><td>'+nx+'</td><td>'+r.n+'</td><td><span class="tag t-'+r.tag+'">'+r.tag+'</span></td>';
+      }
+    }catch(e){row.innerHTML='<td>'+esc(nm(p))+'</td><td colspan="6" class="mut">'+esc(shortErr(e))+'</td>';}
+    done++;$('scanStatus').textContent=done+'/'+S.pairs.length;
+    await sleep(150);
+  }
+  $('scanStatus').textContent='Done '+clockStr()+(stale?'  (data old: market may be closed)':'');
+  btn.disabled=false;
+};
+
+// ---------- backtest ----------
+function verdict(s){
+  if(s.decided<100)return 'Fewer than 100 decided trades: too little data to trust.';
+  if(s.wr>s.be+3&&s.h1>s.be&&s.h2>s.be)return 'Above break-even in both halves. Promising, but re-test on other pairs and periods before trusting it.';
+  if(s.wr>s.be)return 'Slightly above break-even but not stable across both halves. Could be luck.';
+  return 'At or below break-even. No evidence of an edge.';
+}
+function kv(a,b){return '<div class="kv"><span class="mut">'+a+'</span><span>'+b+'</span></div>';}
+function summaryHtml(title,s){
+  return '<div class="card"><b>'+esc(title)+'</b>'+
+    kv('Trades',s.trades+' (win '+s.wins+', loss '+s.losses+', tie '+s.ties+')')+
+    kv('Win rate',s.wr.toFixed(1)+'%')+
+    kv('Break-even needed',s.be.toFixed(1)+'%')+
+    kv('P/L (stake '+S.stake+')',(s.pnl>=0?'+':'')+s.pnl.toFixed(2))+
+    kv('Worst losing streak',s.worst)+
+    kv('1st half / 2nd half',s.h1.toFixed(1)+'% / '+s.h2.toFixed(1)+'%')+
+    '<div class="verdict">'+verdict(s)+'</div></div>';
+}
+$('btRun').onclick=async function(){
+  var btn=$('btRun');btn.disabled=true;$('btStatus').textContent='Loading data...';
+  try{
+    var p=$('btPair').value;
+    var c=(await fetchCandles(p,S.interval,RANGE[S.interval]||'30d')).map(function(x){return x[1];});
+    $('btOut').innerHTML=summaryHtml(nm(p)+'  '+S.interval+'  RSI('+S.period+') '+S.low+'/'+S.high+'  expiry '+S.expiry,summarize(runBacktest(c,S),S));
+    $('btStatus').textContent=c.length+' candles';
+  }catch(e){$('btStatus').textContent='Error: '+shortErr(e);}
+  btn.disabled=false;
+};
+$('btAll').onclick=async function(){
+  var btn=$('btAll');btn.disabled=true;
+  var rows='',be=100/(1+S.payout/100);
+  for(var k=0;k<S.pairs.length;k++){
+    var p=S.pairs[k];$('btStatus').textContent=(k+1)+'/'+S.pairs.length+' '+nm(p);
+    try{
+      var c=(await fetchCandles(p,S.interval,RANGE[S.interval]||'30d')).map(function(x){return x[1];});
+      var s=summarize(runBacktest(c,S),S);
+      var good=s.decided>=100&&s.wr>s.be&&s.h1>s.be&&s.h2>s.be;
+      rows+='<tr><td><b>'+esc(nm(p))+'</b></td><td>'+s.decided+'</td><td class="'+(s.wr>s.be?'up':'')+'">'+s.wr.toFixed(1)+'%</td><td>'+s.h1.toFixed(0)+'/'+s.h2.toFixed(0)+'</td><td>'+(s.pnl>=0?'+':'')+s.pnl.toFixed(1)+'</td><td><span class="tag t-'+(good?'check':'noise')+'">'+(good?'check':'-')+'</span></td></tr>';
+    }catch(e){rows+='<tr><td>'+esc(nm(p))+'</td><td colspan="5" class="mut">'+esc(shortErr(e))+'</td></tr>';}
+    $('btOut').innerHTML='<div class="card" style="padding:6px 8px"><table><thead><tr><th>Pair</th><th>Trades</th><th>Win%</th><th>H1/H2</th><th>P/L</th><th>Flag</th></tr></thead><tbody>'+rows+'</tbody></table></div><p class="note">Break-even needed: '+be.toFixed(1)+'%. "check" = above break-even in both halves with 100+ trades. Testing many pairs makes lucky winners likely, so re-test any "check" on different data.</p>';
+    await sleep(150);
+  }
+  $('btStatus').textContent='Done';btn.disabled=false;
+};
+
+// ---------- trade log ----------
+function renderLog(){
+  var dec=LOG.filter(function(e){return e.res!=='tie';});
+  var wins=dec.filter(function(e){return e.res==='win';}).length;
+  var wr=dec.length?wins/dec.length*100:0,be=100/(1+S.payout/100),pnl=0;
+  LOG.forEach(function(e){if(e.res==='win')pnl+=e.stake*S.payout/100;else if(e.res==='loss')pnl-=e.stake;});
+  $('logStats').innerHTML=kv('Trades logged',LOG.length+' / 100 goal')+kv('Win rate',dec.length?wr.toFixed(1)+'%':'-')+kv('Break-even needed',be.toFixed(1)+'%')+kv('P/L',(pnl>=0?'+':'')+pnl.toFixed(2))+
+    (dec.length>=100?'<div class="verdict">'+(wr>be?'Above break-even over 100+ trades. Keep going and compare with your backtest.':'At or below break-even over 100+ trades. No evidence of an edge.')+'</div>':'<div class="note">Log at least 100 trades before judging the rule.</div>');
+  var html='';
+  for(var i=LOG.length-1;i>=0;i--){
+    var e=LOG[i];
+    html+='<div class="entry"><div><b>'+esc(nm(e.pair))+'</b> <span class="'+(e.side==='UP'?'up':'down')+'">'+e.side+'</span> <span class="mut">'+e.stake+'</span> '+
+      '<span class="'+(e.res==='win'?'up':(e.res==='loss'?'down':'mut'))+'">'+e.res.toUpperCase()+'</span><div class="mut" style="font-size:11px">'+esc(e.t)+(e.note?' - '+esc(e.note):'')+'</div></div><button class="x" onclick="delEntry('+i+')">x</button></div>';
+  }
+  $('lgList').innerHTML=html||'<span class="mut">No trades yet.</span>';
+}
+function delEntry(i){LOG.splice(i,1);save('sl_log',LOG);renderLog();}
+$('lgAdd').onclick=function(){
+  LOG.push({t:new Date().toLocaleString(),pair:$('lgPair').value,side:$('lgSide').value,stake:parseFloat($('lgStake').value)||1,res:$('lgRes').value,note:$('lgNote').value.trim()});
+  $('lgNote').value='';save('sl_log',LOG);renderLog();
+};
+var _clr=0;
+$('lgClear').onclick=function(){
+  var b=$('lgClear');
+  if(!_clr){_clr=1;b.textContent='Tap again to confirm';setTimeout(function(){_clr=0;b.textContent='Clear all';},3000);return;}
+  LOG=[];save('sl_log',LOG);_clr=0;b.textContent='Clear all';renderLog();
+};
+
+// ---------- clock + init ----------
+function clockStr(){
+  try{return new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',timeZone:'Asia/Dhaka'})+' BDT';}
+  catch(e){return new Date().toLocaleTimeString();}
+}
+setInterval(function(){$('clock').textContent=clockStr();},30000);
+$('clock').textContent=clockStr();
+fillSettings();fillPairSelects();renderLog();
+</script>
+</body>
+</html>
