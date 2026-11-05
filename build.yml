@@ -1,0 +1,829 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Generate Android project around index.html
+        run: |
+          set -e
+          test -f index.html
+          mkdir -p app/src/main/assets app/src/main/java/com/example/signallab
+          cp index.html app/src/main/assets/index.html
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "SignalLab"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=false
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.example.signallab"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.example.signallab"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 2
+                  versionName = "2.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <application
+                  android:label="Signal Lab"
+                  android:allowBackup="false"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:windowSoftInputMode="adjustResize"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".LiveService"
+                      android:exported="false"
+                      android:foregroundServiceType="mediaProjection" />
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/example/signallab/MainActivity.kt <<'EOF'
+          package com.example.signallab
+
+          import android.annotation.SuppressLint
+          import android.app.Activity
+          import android.content.Context
+          import android.content.Intent
+          import android.media.projection.MediaProjectionManager
+          import android.net.Uri
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.webkit.JavascriptInterface
+          import android.webkit.WebView
+          import android.webkit.WebViewClient
+          import org.json.JSONObject
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.util.concurrent.Executors
+
+          class MainActivity : Activity() {
+              private lateinit var web: WebView
+              private val pool = Executors.newFixedThreadPool(3)
+
+              @SuppressLint("SetJavaScriptEnabled")
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  web = WebView(this)
+                  setContentView(web)
+                  web.settings.javaScriptEnabled = true
+                  web.settings.domStorageEnabled = true
+                  web.addJavascriptInterface(Bridge(), "Native")
+                  web.webViewClient = WebViewClient()
+                  web.loadUrl("file:///android_asset/index.html")
+              }
+
+              private fun requestCapture() {
+                  val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                  startActivityForResult(mpm.createScreenCaptureIntent(), 1001)
+              }
+
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode == 1001 && resultCode == RESULT_OK && data != null) {
+                      val i = Intent(this, LiveService::class.java)
+                      i.putExtra("code", resultCode)
+                      i.putExtra("data", data)
+                      startForegroundService(i)
+                  }
+              }
+
+              inner class Bridge {
+                  @JavascriptInterface
+                  fun get(id: Int, url: String) {
+                      pool.execute {
+                          var ok = false
+                          var body = ""
+                          try {
+                              val c = URL(url).openConnection() as HttpURLConnection
+                              c.connectTimeout = 15000
+                              c.readTimeout = 25000
+                              c.setRequestProperty("User-Agent", "Mozilla/5.0")
+                              body = c.inputStream.bufferedReader().use { it.readText() }
+                              ok = true
+                          } catch (e: Exception) {
+                              body = e.toString()
+                          }
+                          val js = "window.onNative(" + id + "," + ok + "," + JSONObject.quote(body) + ")"
+                          runOnUiThread { web.evaluateJavascript(js, null) }
+                      }
+                  }
+
+                  @JavascriptInterface
+                  fun startLive(cfg: String): String {
+                      getSharedPreferences("live", Context.MODE_PRIVATE).edit().putString("cfg", cfg).apply()
+                      if (!Settings.canDrawOverlays(this@MainActivity)) {
+                          runOnUiThread {
+                              startActivity(
+                                  Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + packageName))
+                              )
+                          }
+                          return "overlay"
+                      }
+                      runOnUiThread { requestCapture() }
+                      return "ok"
+                  }
+
+                  @JavascriptInterface
+                  fun stopLive() {
+                      runOnUiThread { stopService(Intent(this@MainActivity, LiveService::class.java)) }
+                  }
+
+                  @JavascriptInterface
+                  fun liveStats(): String {
+                      return getSharedPreferences("live", Context.MODE_PRIVATE).getString("stats", "") ?: ""
+                  }
+
+                  @JavascriptInterface
+                  fun resetLive() {
+                      val ed = getSharedPreferences("live", Context.MODE_PRIVATE).edit()
+                      for (id in Rules.IDS) {
+                          ed.putInt("hits_" + id, 0)
+                          ed.putInt("total_" + id, 0)
+                      }
+                      ed.remove("stats")
+                      ed.apply()
+                  }
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/example/signallab/ChartParser.kt <<'EOF'
+          package com.example.signallab
+
+          /** One candle read from the screen. close = pixel y of the close (smaller y = higher price). */
+          class Cand(val color: Int, val close: Int, val body: Int, val x0: Int)
+
+          object ChartParser {
+              const val NONE: Byte = 0
+              const val GREEN: Byte = 1
+              const val RED: Byte = 2
+
+              fun classify(r: Int, g: Int, b: Int): Byte {
+                  if (g > r + 50 && g > b + 30 && g > 120) return GREEN
+                  if (r > g + 80 && r > b + 80 && r > 170) return RED
+                  return NONE
+              }
+
+              /** grid: h*w row-major class codes. Returns candles left to right. */
+              fun parse(grid: ByteArray, w: Int, h: Int): List<Cand> {
+                  val gc = IntArray(w)
+                  val rc = IntArray(w)
+                  for (y in 0 until h) {
+                      val base = y * w
+                      for (x in 0 until w) {
+                          val v = grid[base + x]
+                          if (v == GREEN) gc[x]++ else if (v == RED) rc[x]++
+                      }
+                  }
+                  val col = ByteArray(w)
+                  for (x in 0 until w) {
+                      if (gc[x] >= 1 && gc[x] >= rc[x]) col[x] = GREEN
+                      else if (rc[x] >= 1 && rc[x] > gc[x]) col[x] = RED
+                  }
+                  val out = ArrayList<Cand>()
+                  var x = 0
+                  while (x < w) {
+                      if (col[x] == NONE) {
+                          x++
+                          continue
+                      }
+                      val c = col[x]
+                      val x0 = x
+                      while (x < w && col[x] == c) x++
+                      val x1 = x - 1
+                      val width = x1 - x0 + 1
+                      if (width < 4) continue
+                      val thr = Math.max(3, width / 2)
+                      var btop = -1
+                      var bbot = -1
+                      var bestCnt = 0
+                      var bestY = 0
+                      for (y in 0 until h) {
+                          var cnt = 0
+                          val base = y * w
+                          for (xx in x0..x1) {
+                              if (grid[base + xx] == c) cnt++
+                          }
+                          if (cnt > bestCnt) {
+                              bestCnt = cnt
+                              bestY = y
+                          }
+                          if (cnt >= thr) {
+                              if (btop < 0) btop = y
+                              bbot = y
+                          }
+                      }
+                      if (bestCnt == 0) continue
+                      if (btop < 0) {
+                          btop = bestY
+                          bbot = bestY
+                      }
+                      val green = (c == GREEN)
+                      out.add(Cand(if (green) 1 else -1, if (green) btop else bbot, bbot - btop, x0))
+                  }
+                  return out
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/example/signallab/Tracker.kt <<'EOF'
+          package com.example.signallab
+
+          import java.util.Random
+
+          object Rules {
+              val IDS = arrayOf("rsi50", "rsi3070", "trend3", "revert", "random")
+              val NAMES = arrayOf("RSI<50 up", "RSI 30/70", "Trend 3", "Revert", "Random")
+
+              fun rsiLast(v: DoubleArray, period: Int): Double {
+                  val n = v.size
+                  if (n <= period) return Double.NaN
+                  var g = 0.0
+                  var l = 0.0
+                  for (i in 1..period) {
+                      val d = v[i] - v[i - 1]
+                      if (d >= 0) g += d else l -= d
+                  }
+                  var ag = g / period
+                  var al = l / period
+                  for (i in period + 1 until n) {
+                      val d = v[i] - v[i - 1]
+                      ag = (ag * (period - 1) + (if (d > 0) d else 0.0)) / period
+                      al = (al * (period - 1) + (if (d < 0) -d else 0.0)) / period
+                  }
+                  if (al == 0.0) return if (ag > 0) 100.0 else 50.0
+                  return 100.0 - 100.0 / (1.0 + ag / al)
+              }
+
+              /** +1 UP, -1 DOWN, 0 abstain. */
+              fun predict(id: String, closed: List<Cand>, rnd: Random): Int {
+                  val n = closed.size
+                  if (n < 16) return 0
+                  val v = DoubleArray(n) { (-closed[it].close).toDouble() }
+                  if (id == "rsi50") return if (rsiLast(v, 14) < 50) 1 else -1
+                  if (id == "rsi3070") {
+                      val r = rsiLast(v, 14)
+                      return if (r < 30) 1 else if (r > 70) -1 else 0
+                  }
+                  if (id == "trend3") {
+                      val s = closed[n - 1].color + closed[n - 2].color + closed[n - 3].color
+                      return if (s > 0) 1 else -1
+                  }
+                  if (id == "revert") return -closed[n - 1].color
+                  if (id == "random") return if (rnd.nextBoolean()) 1 else -1
+                  return 0
+              }
+          }
+
+          /**
+           * Watches the list of CLOSED candles from frame to frame, detects when a new candle
+           * has closed, and scores every rule's pending call against the colour of that candle.
+           */
+          class Tracker(private val tol: Int) {
+              var prev: List<Cand> = ArrayList()
+              val pending = HashMap<String, Int>()
+              var prevPending = HashMap<String, Int>()
+              val hits = HashMap<String, Int>()
+              val total = HashMap<String, Int>()
+              private val rnd = Random()
+              var resyncs = 0
+              var scored = false
+              var outcome = 0
+
+              init {
+                  for (id in Rules.IDS) {
+                      hits[id] = 0
+                      total[id] = 0
+                  }
+              }
+
+              private fun match(a: Cand, b: Cand): Boolean {
+                  return a.color == b.color && Math.abs(a.close - b.close) <= tol
+              }
+
+              /** returns [k, score]; k = number of new candles, -1 if nothing lines up. */
+              private fun bestShift(cur: List<Cand>): DoubleArray {
+                  var bestK = -1.0
+                  var bestS = 0.0
+                  for (k in 0..3) {
+                      val o = prev.size - cur.size + k
+                      if (o < 0) continue
+                      var tot = 0
+                      var ok = 0
+                      for (i in 0 until cur.size - k) {
+                          val j = i + o
+                          if (j >= prev.size) break
+                          tot++
+                          if (match(cur[i], prev[j])) ok++
+                      }
+                      if (tot < 6) continue
+                      val s = ok.toDouble() / tot
+                      if (s > bestS + 1e-9) {
+                          bestS = s
+                          bestK = k.toDouble()
+                      }
+                  }
+                  return doubleArrayOf(bestK, bestS)
+              }
+
+              private fun predictAll(cur: List<Cand>) {
+                  for (id in Rules.IDS) pending[id] = Rules.predict(id, cur, rnd)
+              }
+
+              fun update(cur: List<Cand>): String {
+                  scored = false
+                  if (prev.isEmpty()) {
+                      prev = cur
+                      predictAll(cur)
+                      return "init"
+                  }
+                  val r = bestShift(cur)
+                  val k = r[0].toInt()
+                  val s = r[1]
+                  if (k < 0 || s < 0.8) {
+                      resyncs++
+                      prev = cur
+                      predictAll(cur)
+                      return "resync"
+                  }
+                  if (k == 0) {
+                      prev = cur
+                      return "same"
+                  }
+                  if (k == 1 && cur[cur.size - 1].body >= 2) {
+                      val out = cur[cur.size - 1].color
+                      prevPending = HashMap(pending)
+                      for (id in Rules.IDS) {
+                          val p = pending[id] ?: 0
+                          if (p != 0) {
+                              total[id] = (total[id] ?: 0) + 1
+                              if (p == out) hits[id] = (hits[id] ?: 0) + 1
+                          }
+                      }
+                      scored = true
+                      outcome = out
+                  }
+                  prev = cur
+                  predictAll(cur)
+                  return "new" + k
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/example/signallab/LiveService.kt <<'EOF'
+          package com.example.signallab
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.graphics.Color
+          import android.graphics.PixelFormat
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.hardware.display.DisplayManager
+          import android.hardware.display.VirtualDisplay
+          import android.media.ImageReader
+          import android.media.projection.MediaProjection
+          import android.media.projection.MediaProjectionManager
+          import android.os.Build
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import android.util.DisplayMetrics
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.WindowManager
+          import android.widget.TextView
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+          import java.util.concurrent.Executors
+          import java.util.concurrent.ScheduledExecutorService
+          import java.util.concurrent.TimeUnit
+
+          class LiveService : Service() {
+              private var projection: MediaProjection? = null
+              private var vdisplay: VirtualDisplay? = null
+              private var reader: ImageReader? = null
+              private var wm: WindowManager? = null
+              private var overlay: TextView? = null
+              private var exec: ScheduledExecutorService? = null
+              private val ui = Handler(Looper.getMainLooper())
+              private var tracker: Tracker? = null
+              private var capW = 0
+              private var capH = 0
+              private var cTop = 21.0
+              private var cBottom = 72.0
+              private var cRight = 80.0
+              private var cInterval = 2
+              private var cPayout = 55.0
+              private var cMain = "rsi50"
+              private val recent = ArrayList<String>()
+              private var lastCandles = 0
+              private var statusText = ""
+              private val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.US)
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  if (intent == null) {
+                      stopSelf()
+                      return START_NOT_STICKY
+                  }
+                  startForegroundNotif()
+                  try {
+                      setup(intent)
+                  } catch (e: Throwable) {
+                      statusText = "ERR setup: " + e.toString()
+                      refresh()
+                      stopSelf()
+                  }
+                  return START_NOT_STICKY
+              }
+
+              private fun startForegroundNotif() {
+                  val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                  nm.createNotificationChannel(NotificationChannel("live", "Live scan", NotificationManager.IMPORTANCE_LOW))
+                  val n = Notification.Builder(this, "live")
+                      .setContentTitle("Signal Lab live scan")
+                      .setContentText("Reading the chart on screen")
+                      .setSmallIcon(android.R.drawable.ic_menu_view)
+                      .build()
+                  if (Build.VERSION.SDK_INT >= 29) {
+                      startForeground(11, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+                  } else {
+                      startForeground(11, n)
+                  }
+              }
+
+              private fun setup(intent: Intent) {
+                  teardown()
+                  val prefs = getSharedPreferences("live", Context.MODE_PRIVATE)
+                  try {
+                      val j = JSONObject(prefs.getString("cfg", "{}") ?: "{}")
+                      cTop = j.optDouble("top", 21.0)
+                      cBottom = j.optDouble("bottom", 72.0)
+                      cRight = j.optDouble("right", 80.0)
+                      cInterval = Math.max(1, j.optInt("interval", 2))
+                      cPayout = j.optDouble("payout", 55.0)
+                      cMain = j.optString("main", "rsi50")
+                  } catch (e: Exception) {
+                  }
+                  recent.clear()
+                  val code = intent.getIntExtra("code", 0)
+                  val data = intent.getParcelableExtra<Intent>("data")
+                  if (data == null) {
+                      statusText = "ERR no screen-capture permission data"
+                      refresh()
+                      stopSelf()
+                      return
+                  }
+                  val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                  val proj = mpm.getMediaProjection(code, data)
+                  proj.registerCallback(object : MediaProjection.Callback() {
+                      override fun onStop() {
+                          ui.post { stopSelf() }
+                      }
+                  }, ui)
+                  projection = proj
+
+                  val w = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                  wm = w
+                  val dm = DisplayMetrics()
+                  w.defaultDisplay.getRealMetrics(dm)
+                  val scale = Math.min(1.0, 900.0 / dm.widthPixels)
+                  capW = (dm.widthPixels * scale).toInt()
+                  capH = (dm.heightPixels * scale).toInt()
+                  val rd = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2)
+                  reader = rd
+                  vdisplay = proj.createVirtualDisplay(
+                      "live", capW, capH, dm.densityDpi,
+                      DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, rd.surface, null, null
+                  )
+
+                  val tr = Tracker(3)
+                  for (id in Rules.IDS) {
+                      tr.hits[id] = prefs.getInt("hits_" + id, 0)
+                      tr.total[id] = prefs.getInt("total_" + id, 0)
+                  }
+                  tracker = tr
+
+                  makeOverlay()
+                  statusText = "running, waiting for the chart..."
+                  refresh()
+
+                  val ex = Executors.newSingleThreadScheduledExecutor()
+                  exec = ex
+                  ex.scheduleWithFixedDelay(Runnable { tick() }, 1500L, (cInterval * 1000).toLong(), TimeUnit.MILLISECONDS)
+              }
+
+              private fun makeOverlay() {
+                  val w = wm ?: return
+                  val tv = TextView(this)
+                  tv.typeface = Typeface.MONOSPACE
+                  tv.textSize = 11f
+                  tv.setTextColor(Color.WHITE)
+                  tv.setPadding(18, 12, 18, 12)
+                  val bg = GradientDrawable()
+                  bg.setColor(0xCC0E1217.toInt())
+                  bg.cornerRadius = 24f
+                  tv.background = bg
+                  tv.text = "Starting..."
+                  val lp = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  lp.gravity = Gravity.TOP or Gravity.START
+                  lp.x = 20
+                  lp.y = 160
+                  tv.setOnTouchListener(object : View.OnTouchListener {
+                      var sx = 0
+                      var sy = 0
+                      var tx = 0f
+                      var ty = 0f
+                      override fun onTouch(v: View, e: MotionEvent): Boolean {
+                          if (e.action == MotionEvent.ACTION_DOWN) {
+                              sx = lp.x
+                              sy = lp.y
+                              tx = e.rawX
+                              ty = e.rawY
+                          } else if (e.action == MotionEvent.ACTION_MOVE) {
+                              lp.x = sx + (e.rawX - tx).toInt()
+                              lp.y = sy + (e.rawY - ty).toInt()
+                              w.updateViewLayout(tv, lp)
+                          }
+                          return true
+                      }
+                  })
+                  w.addView(tv, lp)
+                  overlay = tv
+              }
+
+              private fun tick() {
+                  try {
+                      val rd = reader ?: return
+                      val img = rd.acquireLatestImage() ?: return
+                      val top = (capH * cTop / 100.0).toInt()
+                      val bot = (capH * cBottom / 100.0).toInt()
+                      val gw = (capW * cRight / 100.0).toInt()
+                      val gh = bot - top
+                      if (gh < 50 || gw < 50) {
+                          img.close()
+                          statusText = "ERR chart area too small"
+                          refresh()
+                          return
+                      }
+                      val grid = ByteArray(gw * gh)
+                      try {
+                          val plane = img.planes[0]
+                          val buf = plane.buffer
+                          val rs = plane.rowStride
+                          val ps = plane.pixelStride
+                          val row = ByteArray(gw * ps)
+                          for (y in 0 until gh) {
+                              buf.position((top + y) * rs)
+                              buf.get(row, 0, gw * ps)
+                              val base = y * gw
+                              for (x in 0 until gw) {
+                                  val o = x * ps
+                                  grid[base + x] = ChartParser.classify(
+                                      row[o].toInt() and 0xFF,
+                                      row[o + 1].toInt() and 0xFF,
+                                      row[o + 2].toInt() and 0xFF
+                                  )
+                              }
+                          }
+                      } finally {
+                          img.close()
+                      }
+                      val all = ChartParser.parse(grid, gw, gh)
+                      val cs = ArrayList<Cand>()
+                      for (c in all) {
+                          if (c.x0 > 1) cs.add(c)
+                      }
+                      lastCandles = cs.size
+                      if (cs.size < 18) {
+                          statusText = "chart not found: " + cs.size + " candles. Open the chart and adjust the chart area."
+                          refresh()
+                          return
+                      }
+                      val closed = ArrayList<Cand>(cs.subList(0, cs.size - 1))
+                      val tr = tracker ?: return
+                      tr.update(closed)
+                      if (tr.scored) {
+                          val p = tr.prevPending[cMain] ?: 0
+                          if (p != 0) {
+                              val hit = (p == tr.outcome)
+                              recent.add(0, timeFmt.format(Date()) + "  " + dirStr(p) + " -> " + dirStr(tr.outcome) + (if (hit) "  HIT" else "  miss"))
+                              while (recent.size > 15) recent.removeAt(recent.size - 1)
+                          }
+                      }
+                      statusText = "OK, " + cs.size + " candles read"
+                      refresh()
+                  } catch (e: Throwable) {
+                      statusText = "ERR " + e.toString()
+                      refresh()
+                  }
+              }
+
+              private fun dirStr(v: Int): String = if (v > 0) "UP" else if (v < 0) "DOWN" else "-"
+              private fun arrow(v: Int): String = if (v > 0) "▲" else if (v < 0) "▼" else "-"
+
+              private fun refresh() {
+                  val tr = tracker
+                  val be = 100.0 / (1.0 + cPayout / 100.0)
+                  val sb = StringBuilder()
+                  if (tr != null && lastCandles >= 18) {
+                      val main = tr.pending[cMain] ?: 0
+                      sb.append(if (main > 0) "▲ UP" else if (main < 0) "▼ DOWN" else "- WAIT").append("  next candle\n")
+                      for (i in Rules.IDS.indices) {
+                          val id = Rules.IDS[i]
+                          val h = tr.hits[id] ?: 0
+                          val t = tr.total[id] ?: 0
+                          val pct = if (t > 0) h * 100.0 / t else 0.0
+                          sb.append(String.format(Locale.US, "%-10s %s %5.1f%% n=%d\n", Rules.NAMES[i], arrow(tr.pending[id] ?: 0), pct, t))
+                      }
+                      sb.append(String.format(Locale.US, "break-even %.1f%%  candles %d", be, lastCandles))
+                  } else {
+                      sb.append(statusText)
+                  }
+                  val text = sb.toString()
+                  ui.post { overlay?.text = text }
+
+                  try {
+                      val o = JSONObject()
+                      o.put("status", statusText)
+                      o.put("candles", lastCandles)
+                      o.put("main", cMain)
+                      o.put("call", if (tr != null) (tr.pending[cMain] ?: 0) else 0)
+                      o.put("payout", cPayout)
+                      o.put("be", be)
+                      o.put("resyncs", if (tr != null) tr.resyncs else 0)
+                      val arr = JSONArray()
+                      val ed = getSharedPreferences("live", Context.MODE_PRIVATE).edit()
+                      for (i in Rules.IDS.indices) {
+                          val id = Rules.IDS[i]
+                          val r = JSONObject()
+                          r.put("id", id)
+                          r.put("name", Rules.NAMES[i])
+                          r.put("pred", if (tr != null) (tr.pending[id] ?: 0) else 0)
+                          val h = if (tr != null) (tr.hits[id] ?: 0) else 0
+                          val t = if (tr != null) (tr.total[id] ?: 0) else 0
+                          r.put("hits", h)
+                          r.put("total", t)
+                          arr.put(r)
+                          if (tr != null) {
+                              ed.putInt("hits_" + id, h)
+                              ed.putInt("total_" + id, t)
+                          }
+                      }
+                      o.put("rules", arr)
+                      val rc = JSONArray()
+                      for (s in recent) rc.put(s)
+                      o.put("recent", rc)
+                      ed.putString("stats", o.toString())
+                      ed.apply()
+                  } catch (e: Exception) {
+                  }
+              }
+
+              private fun teardown() {
+                  try { exec?.shutdownNow() } catch (e: Exception) { }
+                  exec = null
+                  try { vdisplay?.release() } catch (e: Exception) { }
+                  vdisplay = null
+                  try { reader?.close() } catch (e: Exception) { }
+                  reader = null
+                  try { projection?.stop() } catch (e: Exception) { }
+                  projection = null
+                  try {
+                      val ov = overlay
+                      if (ov != null) wm?.removeView(ov)
+                  } catch (e: Exception) { }
+                  overlay = null
+              }
+
+              override fun onDestroy() {
+                  teardown()
+                  statusText = "stopped"
+                  lastCandles = 0
+                  refresh()
+                  super.onDestroy()
+              }
+          }
+          EOF
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Name the APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk SignalLab.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SignalLab-apk
+          path: SignalLab.apk
+
+      - name: Publish as a release (easy download on phone)
+        continue-on-error: true
+        uses: ncipollo/release-action@v1
+        with:
+          tag: latest-build
+          name: Latest build
+          body: Signal Lab APK, built automatically.
+          artifacts: SignalLab.apk
+          allowUpdates: true
+          replacesArtifacts: true
+          makeLatest: true
+          token: ${{ secrets.GITHUB_TOKEN }}

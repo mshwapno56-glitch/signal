@@ -34,7 +34,7 @@ td{padding:7px 3px;border-bottom:1px solid var(--line);white-space:nowrap}
 .verdict{margin-top:8px;padding:8px 10px;border-radius:8px;background:#222c39}
 .note{font-size:12px;color:var(--mut);margin:8px 2px}
 nav{position:fixed;left:0;right:0;bottom:0;display:flex;background:#121820;border-top:1px solid var(--line)}
-nav button{flex:1;background:none;border:0;color:var(--mut);padding:15px 0;font-size:13px}
+nav button{flex:1;background:none;border:0;color:var(--mut);padding:15px 0;font-size:12px}
 nav button.on{color:var(--acc);font-weight:600}
 .entry{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--line);font-size:13px}
 .x{background:none;border:0;color:var(--mut);font-size:20px;padding:0 6px}
@@ -81,6 +81,30 @@ nav button.on{color:var(--acc);font-weight:600}
   <div class="card" id="lgList"></div>
 </section>
 
+<section id="tab-live" class="tab">
+  <div class="card">
+    <b>Live chart reader (demo practice)</b>
+    <ol class="note" style="padding-left:18px;margin:6px 0">
+      <li>Tap Start. First time: allow "Display over other apps", come back, tap Start again, then allow screen capture.</li>
+      <li>Open Quotex in your browser with the chart visible. A small box floats on top (drag it to move).</li>
+      <li>After each candle closes, the app scores every rule's call. Judge the hit rates after 100+ candles.</li>
+    </ol>
+    <div class="row"><button class="btn" id="lvStart">Start live</button><button class="btn alt" id="lvStop">Stop</button><button class="btn alt" id="lvReset">Reset scores</button></div>
+    <div class="grid2">
+      <div><label>Chart top (% of screen height)</label><input id="lvTop" type="number" inputmode="decimal"></div>
+      <div><label>Chart bottom (%)</label><input id="lvBottom" type="number" inputmode="decimal"></div>
+      <div><label>Chart right edge (% of width)</label><input id="lvRight" type="number" inputmode="decimal"></div>
+      <div><label>Scan every (sec)</label><input id="lvInt" type="number" inputmode="numeric"></div>
+      <div><label>Payout % (for break-even)</label><input id="lvPayout" type="number" inputmode="decimal"></div>
+      <div><label>Main call rule</label>
+        <select id="lvMain"><option value="rsi50">RSI&lt;50 up</option><option value="rsi3070">RSI 30/70</option><option value="trend3">Trend 3</option><option value="revert">Revert</option><option value="random">Random</option></select></div>
+    </div>
+    <p class="note" id="lvMsg"></p>
+  </div>
+  <div class="card" id="lvStatus"><span class="mut">Not running.</span></div>
+  <p class="note">These are simple rules, not inside knowledge. Expect about 50% and compare with break-even. "Random" is a coin-flip control: if a rule does not clearly beat it after 100+ candles, it has no edge. The result of each call is just the colour of the candle that closed next. If "candles read" is 0 or far off, adjust the chart top/bottom/right values so the box covers only the candles. On Xiaomi phones also allow "Display pop-up windows while running in the background" for this app.</p>
+</section>
+
 <section id="tab-set" class="tab">
   <div class="card">
     <div class="grid2">
@@ -104,6 +128,7 @@ nav button.on{color:var(--acc);font-weight:600}
   <button data-tab="scan" class="on">Scan</button>
   <button data-tab="bt">Backtest</button>
   <button data-tab="log">Log</button>
+  <button data-tab="live">Live</button>
   <button data-tab="set">Settings</button>
 </nav>
 
@@ -355,6 +380,55 @@ $('lgClear').onclick=function(){
   LOG=[];save('sl_log',LOG);_clr=0;b.textContent='Clear all';renderLog();
 };
 
+// ---------- live chart reader (Android only) ----------
+var LIVE=Object.assign({top:21,bottom:72,right:80,interval:2,payout:55,main:'rsi50'},load('sl_live',{}));
+function fillLive(){
+  $('lvTop').value=LIVE.top;$('lvBottom').value=LIVE.bottom;$('lvRight').value=LIVE.right;
+  $('lvInt').value=LIVE.interval;$('lvPayout').value=LIVE.payout;$('lvMain').value=LIVE.main;
+}
+function readLive(){
+  LIVE.top=parseFloat($('lvTop').value)||21;LIVE.bottom=parseFloat($('lvBottom').value)||72;
+  LIVE.right=parseFloat($('lvRight').value)||80;LIVE.interval=Math.max(1,parseInt($('lvInt').value)||2);
+  LIVE.payout=parseFloat($('lvPayout').value)||55;LIVE.main=$('lvMain').value;
+  save('sl_live',LIVE);
+}
+['lvTop','lvBottom','lvRight','lvInt','lvPayout','lvMain'].forEach(function(id){$(id).onchange=readLive;});
+function hasLive(){return !!(window.Native&&window.Native.startLive);}
+$('lvStart').onclick=function(){
+  readLive();
+  if(!hasLive()){$('lvMsg').textContent='Live mode works only inside the Android app.';return;}
+  var r=window.Native.startLive(JSON.stringify(LIVE));
+  $('lvMsg').textContent=(r==='overlay')
+    ?'Allow "Display over other apps" for Signal Lab on the screen that just opened, come back here and tap Start again.'
+    :'Allow screen capture when asked, then open Quotex.';
+};
+$('lvStop').onclick=function(){if(hasLive()){window.Native.stopLive();$('lvMsg').textContent='Stopped.';}};
+$('lvReset').onclick=function(){if(hasLive()){window.Native.resetLive();$('lvStatus').innerHTML='<span class="mut">Scores reset.</span>';}};
+function dirHtml(v){return v>0?'<span class="up">UP</span>':(v<0?'<span class="down">DOWN</span>':'-');}
+function renderLive(s){
+  var h=kv('Status',esc(s.status))+kv('Candles read',s.candles)+kv('Next candle call',dirHtml(s.call));
+  h+='<table style="margin-top:8px"><thead><tr><th>Rule</th><th>Now</th><th>Hit rate (95% noise)</th><th>n</th></tr></thead><tbody>';
+  var anyEnough=false,bestLow=-1;
+  (s.rules||[]).forEach(function(r){
+    var pct=r.total?r.hits*100/r.total:0,me=r.total?98/Math.sqrt(r.total):0;
+    if(r.total>=50){anyEnough=true;if(pct-me>bestLow)bestLow=pct-me;}
+    var cls=(r.total>=30&&pct>s.be)?'up':'';
+    h+='<tr><td>'+esc(r.name)+'</td><td>'+dirHtml(r.pred)+'</td><td class="'+cls+'">'+(r.total?pct.toFixed(1)+'% +/-'+me.toFixed(0):'-')+'</td><td>'+r.total+'</td></tr>';
+  });
+  h+='</tbody></table><div class="note">Break-even needed: '+s.be.toFixed(1)+'%.</div>';
+  if(anyEnough)h+='<div class="verdict">'+(bestLow>s.be?'One rule is above break-even even after the noise margin. Re-test it on another day before trusting it.':'No rule is clearly above break-even yet.')+'</div>';
+  if(s.recent&&s.recent.length)h+='<div class="note" style="margin-top:6px">Recent ('+esc(s.main)+'):<br>'+s.recent.map(esc).join('<br>')+'</div>';
+  $('lvStatus').innerHTML=h;
+}
+function pollLive(){
+  if(!hasLive()||!window.Native.liveStats)return;
+  if(!$('tab-live').classList.contains('on'))return;
+  var t=window.Native.liveStats();
+  if(!t)return;
+  try{renderLive(JSON.parse(t));}catch(e){}
+}
+setInterval(pollLive,2000);
+
 // ---------- clock + init ----------
 function clockStr(){
   try{return new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',timeZone:'Asia/Dhaka'})+' BDT';}
@@ -362,7 +436,7 @@ function clockStr(){
 }
 setInterval(function(){$('clock').textContent=clockStr();},30000);
 $('clock').textContent=clockStr();
-fillSettings();fillPairSelects();renderLog();
+fillSettings();fillPairSelects();fillLive();renderLog();
 </script>
 </body>
 </html>
